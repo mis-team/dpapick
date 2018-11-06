@@ -12,10 +12,6 @@ Windows.
 It is provided with some application probes that includes the built-in logic
 to retreive the corresponding secrets that are protected.
 
-To have more information or to contact us, go to our website:
-http://www.dpapick.com
-
-
 REQUIREMENTS
 
 This application has been developped and tested on python 2.7.
