@@ -1,0 +1,248 @@
+#!/usr/bin/env python
+
+# ############################################################################
+##                                                                         ##
+## This file is part of DPAPIck                                            ##
+## Windows DPAPI decryption & forensic toolkit                             ##
+##                                                                         ##
+##                                                                         ##
+## Copyright (C) 2010, 2011 Cassidian SAS. All rights reserved.            ##
+## This document is the property of Cassidian SAS, it may not be copied or ##
+## circulated without prior licence                                        ##
+##                                                                         ##
+##  Author: Jean-Michel Picod <jmichel.p@gmail.com>                        ##
+##                                                                         ##
+## This program is distributed under GPLv3 licence (see LICENCE.txt)       ##
+##                                                                         ##
+#############################################################################
+
+from DPAPI.Core import masterkey
+import sys
+#sys.path.insert(0, '/opt/dapi/jmichel-dpapick-2bd288482171/DPAPI/Core')
+#import masterkey
+#sys.path.insert(0, '/opt/dapi/jmichel-dpapick-2bd288482171/DPAPI/Probes')
+#import certificate
+from DPAPI import probe
+from DPAPI.Core import blob
+from DPAPI.Probes import dropbox
+from optparse import OptionParser
+import binascii
+from pbkdf2 import PBKDF2
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_v1_5
+from DPAPI.Probes import certificate
+from base64 import b64decode
+import struct
+import hashlib
+import os
+import OpenSSL
+
+
+def hprint(data):
+    print binascii.hexlify(data)
+
+
+
+"""
+class MyMasterKeyPool(masterkey.MasterKeyPool):
+    test = 1
+
+class MyMasterKey(masterkey.MasterKey):
+    test = 1 
+
+class MyDomainKey(masterkey.DomainKey):
+    test = 1
+    
+    def __init__(self, raw=None):
+        self.version = None
+        self.secretLen = None
+        self.accesscheckLen = None
+        self.guidKey = None
+        self.encryptedSecret = None
+        self.accessCheck = None
+        self.decrypted = False
+        self.key = None
+        eater.DataStruct.__init__(self, raw)
+
+    def DecryptWithDCKey(DdcKeyFile):
+        rsakey = RSA.importKey(open(options.pkey, "r").read())
+        cipher = PKCS1_v1_5.new(rsakey)
+        decrypted_data=cipher.decrypt(binascii.unhexlify(binascii.hexlify(revmk)),0)
+        mkdec=decrypted_data[8:72]
+"""
+
+
+class Cert(probe.DPAPIProbe):
+    PROP_PROVIDER = 2
+    PROP_CERTIFICATE = 0x20
+
+    PROPS = {2: "Provider", 3: "SHA-1", 4: "MD5", 15: "Signature hash",
+             20: "Key identifier", 25: "Subject MD5 hash",
+             69: "Backed up", 92: "Pubkey bitlength", 32: "ASN.1 certificate"}
+
+    class CertProvider(probe.DPAPIProbe):
+        def parse(self, data):
+            raw = data.remain()
+            ofs_keyname, ofs_provider = data.eat("2L")
+            self.provider_type = data.eat("L")
+            self.flags = data.eat("L")
+            self.nb_params = data.eat("L")
+            ofs_params = data.eat("L")
+            self.key_specs = data.eat("L")
+            self.keyname = raw[ofs_keyname:]
+            end = self.keyname.find("\x00\x00\x00")
+            if end & 1:
+                end += 1
+            self.keyname = self.keyname[:end].decode("UTF-16LE").rstrip("\x00")
+            self.provider = raw[ofs_provider:]
+            end = self.provider.find("\x00\x00\x00")
+            if end & 1:
+                end += 1
+            self.provider = self.provider[:end].decode("UTF-16LE").rstrip("\x00")
+
+        def __str__(self, indent=""):
+            rv = ["%s+ Cert Provider" % indent]
+            rv.append("%s  - Key name: %s" % (indent, self.keyname))
+            rv.append("%s  - Provider: %s" % (indent, self.provider))
+            return "\n".join(rv)
+
+
+    def parse(self, data):
+        self.props = {}
+        while data:
+            cert_id, n, size = data.eat("3L")
+            self.props[cert_id] = []
+            for _ in xrange(n):
+                if cert_id == self.PROP_PROVIDER:
+                    provider = self.CertProvider()
+                    provider.parse(data.eat_sub(size))
+                    self.props[cert_id].append(provider)
+                    self.name = provider.keyname
+                elif cert_id == self.PROP_CERTIFICATE:
+                    self.certificate = data.eat_string(size)
+                else:
+                    self.props[cert_id].append(data.eat_string(size))
+
+    def __str__(self):
+        rv = ["+ Microsoft Certificate"]
+        for k, v in self.props.iteritems():
+            rv.append("  + %s (%d)" % (self.PROPS.get(k, "Unknown"), k))
+            for p in v:
+                if isinstance(p, str):
+                    rv.append("     - %s" % p.encode("hex"))
+                else:
+                    rv.append(p.__str__(indent="    "))
+        return "\n".join(rv)
+
+
+def derive_dbx_password(user_key):
+
+    APP_KEY = b'\rc\x8c\t.\x8b\x82\xfcE(\x83\xf9_5[\x8e'
+    APP_ITER = 1066
+
+    return PBKDF2(
+        passphrase=user_key, salt=APP_KEY, iterations=APP_ITER).read(16)
+
+if __name__ == "__main__":
+    parser = OptionParser()
+    parser.add_option("--sid", metavar="SID", dest="sid")
+    parser.add_option("--entropy", metavar="ENTROPY", dest="entropy")
+    parser.add_option("--strong", metavar="PASSWORD", dest="strongpwd")
+    parser.add_option("--masterkeydir", metavar="DIRECTORY", dest="masterkeydir")
+    parser.add_option("--credhist", metavar="FILE", dest="credhist")
+    parser.add_option("--wordlist", metavar="FILE", dest="wordlist")
+    parser.add_option("--password", metavar="PASSWORD", dest="password")
+    parser.add_option("--masterkeyfile", metavar="DIRECTORY", dest="masterkeyfile")
+    parser.add_option("--blob", metavar="DPAPI blob FILE", dest="blob")
+    parser.add_option("--dbxblob", metavar="Dropbox DBX blob FILE", dest="dbxblob")
+    parser.add_option("--pkey", metavar="Private domain KEY", dest="pkey")
+    parser.add_option("--pemfile", metavar="RSA private key (PEM) FILE", dest="pemfile")
+    parser.add_option("--certfile", metavar="User Certificate FILE", dest="certfile")
+    parser.add_option("--pfxfile", metavar="output pfx FILE", dest="pfxfile")
+
+    (options, args) = parser.parse_args()
+
+    
+
+    if options.masterkeydir:
+        mkp = masterkey.MasterKeyPool()
+        mkp.loadDirectory(options.masterkeydir)
+        print "loaded masterkey dirs"
+        print mkp
+    if options.credhist and options.sid:
+        mkp.addCredhist(options.sid, options.credhist)
+    if options.masterkeyfile:
+        f=open(options.masterkeyfile,'r')
+        mkf = masterkey.MasterKeyFile(f.read())
+    #mkf.decryptWithPassword(options.sid,options.password)
+    #mkf.masterkey.setDecryptedKey(binascii.unhexlify('b2044984f2e8616e0c430260ba7d30dc986bd8dc5d8825e8fc4329bb982cdf63ebe82b23d4438db45c58ceecc59b80dc6493171d8382c09f263b89c73181635b'))
+    #print mkp
+
+    if options.password and options.sid:
+        print "Trying to decrypt"
+        print mkp.try_credential(options.sid,options.password)
+        print mkp
+    if options.pkey:
+        decrn = mkp.try_domain(options.pkey)
+        if decrn > 0:
+            print "Decrypted: "+str(decrn)
+            for mkl in mkp.keys.values(): #mkl - list with mk, mkbackup, mkdomain
+             for mk in mkl:
+                print mk.guid
+                print mk.masterkey
+
+                
+    #for certificate key 
+    if options.blob:
+        datablob = certificate.PrivateKeyBlob(open(options.blob, 'rb').read())
+        datablob.try_decrypt_with_hash(None, mkp, None)
+        print datablob
+        
+    if options.dbxblob:
+        f=open(options.dbxblob,"rb");
+        datablob = dropbox.Dropbox(f.read())
+
+    if options.password and options.dbxblob:
+        datablob.try_decrypt_with_password(options.password, mkp, options.sid)
+        if datablob.dpapiblob.decrypted:
+                user_key = datablob.user_key
+                print('[{0}] user key:\t{1}'.format("ks", user_key.encode('hex')))
+                dbx_key = derive_dbx_password(datablob.user_key)
+                print('[{0}]  DBX key:\t{1}'.format("ks", dbx_key.encode('hex')))
+        else:
+                sys.stderr.write('Unable to decrypt DPAPI blob!\n')
+
+    if options.pemfile:
+        print "Exporting..."+options.pemfile
+        ff=open(options.pemfile,"w")
+        ff.write(datablob.export())
+        ff.close()
+
+    certs = {}
+    if options.certfile:
+        certfile = open(options.certfile,"rb")
+        c = Cert(certfile.read())
+        certs[c.name] = c.certificate
+        print "Read certificate from certfile "+options.certfile+":"
+        print c
+
+    if options.pfxfile:
+        p12 = OpenSSL.crypto.PKCS12()
+        p12.set_privatekey(OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, datablob.export()))
+        p12.set_certificate(OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, certs[c.name]))
+        pfx_out = open(options.pfxfile, "wb")
+        pfx_out.write(p12.export())
+        pfx_out.close()
+
+    #
+    #datablob = blob.DPAPIBlob(open(options.blob, 'rb').read())
+    #datablob.decrypt(binascii.unhexlify('bce4077cd815348c852ecb326062ba40607ba448c36f209690d65018ce4aa787316dc970a69c109b2dd6b8175093eaddf6b038477b6a1fb6faf8a9d779ad6282'))
+    #print datablob
+    
+    #datablob =     
+
+ 
+
+
+
+# vim:ts=4:expandtab:sw=4

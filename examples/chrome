@@ -1,0 +1,200 @@
+#!/usr/bin/env python
+
+#############################################################################
+##                                                                         ##
+## This file is part of DPAPIck                                            ##
+## Windows DPAPI decryption & forensic toolkit                             ##
+##                                                                         ##
+##                                                                         ##
+## Copyright (C) 2010, 2011 Cassidian SAS. All rights reserved.            ##
+## This document is the property of Cassidian SAS, it may not be copied or ##
+## circulated without prior licence                                        ##
+##                                                                         ##
+##  Author: Jean-Michel Picod <jmichel.p@gmail.com>                        ##
+##                                                                         ##
+## This program is distributed under GPLv3 licence (see LICENCE.txt)       ##
+##                                                                         ##
+#############################################################################
+
+from DPAPI.Probes import chrome
+from DPAPI.Core import masterkey
+import sqlite3
+import hashlib
+import datetime
+import os
+import sys
+from optparse import OptionParser
+
+
+class GetChromePasswords:
+
+    _descr = "Retreive and decrypt the Google Chrome database"
+
+    ## sqlite database is located under
+    ## %LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Web Data (old)
+    ## %LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Login Data (new)
+    ## For winXP, %LOCALAPPDATA% = %USERPROFILE%\\Local Settings\\Application Data
+    ## For Vista/win7, %LOCALAPPDATA% already exists in the environment
+    def main(self, sqldbs, mkp, sid, h):
+        values = {}
+        i = 0
+
+        fields = [ 'origin_url', 'action_url', 'username_element',
+                   'username_value', 'password_element', 'password_value',
+                   'date_created' ]
+
+        for db in sqldbs:
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT %s FROM logins" % ",".join(fields))
+            for row in c:
+                w = {}
+                for f in fields:
+                    w[f] = row[f]
+                b = chrome.ChromePassword(w["password_value"])
+                if b.try_decrypt_with_hash(h, mkp, sid):
+                    w["password_value"] = b.cleartext
+                else:
+                    w["password_value"] = "<unable to decrypt>"
+                values["chromeEntry%d" % i] = w
+                i += 1
+            c.close()
+            conn.close()
+
+        return { self.__class__.__name__: values }
+
+if __name__ == '__main__':
+    parser = OptionParser()
+    parser.add_option("--sid", metavar="SID", dest="sid")
+    parser.add_option("--masterkey", metavar="DIRECTORY", dest="masterkeydir")
+    parser.add_option("--credhist", metavar="FILE", dest="credhist")
+    parser.add_option("--password", metavar="PASSWORD", dest="password")
+    parser.add_option("--hash", metavar="HASH", dest="h")
+    parser.add_option("--pkey", metavar="Private domain KEY", dest="pkey")
+    parser.add_option("--chrome", metavar="CHROMEDB", dest="chromedbs",action="append")
+    parser.add_option("--cookie", metavar="CHROMEDB", dest="chromecoo",action="append")
+                      
+
+    (options, args) = parser.parse_args()
+
+    if options.password and options.h:
+        print >>sys.stderr,"Choose either password or hash option"
+        sys.exit(1)
+    if options.password:
+        options.h = hashlib.sha1(options.password.encode("UTF-16LE")).hexdigest()
+        options.h = options.h.decode('hex')
+
+    print "Loading masterkeys..."
+    mkp = masterkey.MasterKeyPool()
+    mkp.loadDirectory(options.masterkeydir)
+    print "Trting to decrypt keys..."
+    print mkp.try_credential(options.sid,options.password)
+
+    if options.credhist != None:
+        mkp.addCredhistFile(options.sid, options.credhist)
+
+    if options.pkey:
+        decrn = mkp.try_domain(options.pkey)
+        if decrn > 0:
+            print "Decrypted: "+str(decrn)
+            for mkl in mkp.keys.values(): #mkl - list with mk, mkbackup, mkdomain
+             for mk in mkl:
+                print mk.guid
+                #print mk.masterkey
+
+# 'creation_utc', 'host_key', 'value,path', 'expires_utc', 'secure', 'httponly', 'last_access_utc', 'has_expires', 'persistent', 'priority', 'encrypted_value', 'firstpartyonly' 
+    fields = [ 'origin_url', 'action_url', 'username_element',
+               'username_value', 'password_element', 'password_value',
+               'date_created' ]
+    fields1 = [ 'creation_utc', 'host_key', 'name', 'value', 'path', 'expires_utc', 'secure', 'httponly', 'last_access_utc', 'has_expires', 'persistent', 'priority', 'encrypted_value', 'firstpartyonly'  ]
+
+    values = []
+
+    if options.chromecoo:
+        for db in options.chromecoo:
+            if not os.path.isfile(db):
+                continue
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT %s FROM cookies" % ",".join(fields1))
+            for row in c:
+                #print row
+                w = {}
+                for f in fields1:
+                    #print f
+                    w[f] = row[f]
+                b = chrome.ChromePassword(w["encrypted_value"])
+                if b.try_decrypt_with_hash(options.h, mkp, options.sid):
+                #if b.try_decrypt_with_hash(None, mkp, None):
+                    w["encrypted_value"] = b.cleartext
+                else:
+                    w["encrypted_value"] = "<unable to decrypt>"
+
+                if w["expires_utc"]:
+                    timestamp=w["expires_utc"]
+                    #print timestamp
+                    try:
+                        w["expires_utc"]=datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=timestamp)
+                    except:
+                        w["expires_utc"]="Undefined"
+                if w["creation_utc"]:
+                    timestamp=w["creation_utc"]
+                    #print timestamp
+                    try:
+                        w["creation_utc"]=datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=timestamp)
+                    except:
+                        w["creation_utc"]="Undefined"
+
+                if w["last_access_utc"]:
+                    timestamp=w["last_access_utc"]
+                    #print timestamp
+                    try:
+                        w["last_access_utc"]=datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=timestamp)
+                    except:
+                        w["last_access_utc"]="Undefined"
+                values.append(w)
+                #print w
+            c.close()
+            conn.close()
+
+        s = ["Chrome Cookies"]
+        for e in values:
+            s.append('-'*40)
+            for f in fields1:
+                s.append("%s: %s" % (f, e[f]))
+        print "\n".join(s)
+
+
+    if options.chromedbs:
+        for db in options.chromedbs:
+            if not os.path.isfile(db):
+                continue
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT %s FROM logins" % ",".join(fields))
+            for row in c:
+                w = {}
+                for f in fields:
+                    w[f] = row[f]
+                b = chrome.ChromePassword(w["password_value"])
+                if b.try_decrypt_with_hash(options.h, mkp, options.sid):
+                #if b.try_decrypt_with_hash(None, mkp, None):
+                    w["password_value"] = b.cleartext
+                else:
+                    w["password_value"] = "<unable to decrypt>"
+                values.append(w)
+            c.close()
+            conn.close()
+
+        s = ["Chrome passwords"]
+        for e in values:
+            s.append('-'*40)
+            for f in fields:
+                s.append("%s: %s" % (f, e[f]))
+        print "\n".join(s)
+
+# vim:ts=4:expandtab:sw=4
+

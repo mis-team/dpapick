@@ -1,0 +1,65 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+#############################################################################
+##                                                                         ##
+## This file is part of DPAPIck                                            ##
+## Windows DPAPI decryption & forensic toolkit                             ##
+##                                                                         ##
+##                                                                         ##
+## Copyright (C) 2010, 2011 Cassidian SAS. All rights reserved.            ##
+## This document is the property of Cassidian SAS, it may not be copied or ##
+## circulated without prior licence                                        ##
+##                                                                         ##
+##  Author: Jean-Michel Picod <jmichel.p@gmail.com>                        ##
+##                                                                         ##
+## This program is distributed under GPLv3 licence (see LICENCE.txt)       ##
+##                                                                         ##
+#############################################################################
+##                                                                         ##
+## Dropbox DBX password                                                    ##
+##                                                                         ##
+##  Author: Francesco Picasso <francesco.picasso@gmail.com>                ##
+##                                                                         ##
+#############################################################################
+
+from DPAPI.Core import masterkey, registry
+from DPAPI.Probes import dropbox
+from optparse import OptionParser
+
+import sys
+
+
+if __name__ == "__main__":
+    parser = OptionParser()
+    parser.add_option("--sid", metavar="SID", dest="sid")
+    parser.add_option("--masterkey", metavar="DIRECTORY", dest="masterkeydir")
+    parser.add_option("--credhist", metavar="FILE", dest="credhist")
+    parser.add_option("--password", metavar="PASSWORD", dest="password")
+    parser.add_option("--hash", metavar="HASH", dest="h")
+    parser.add_option("--ntuser", metavar="NTUSER", dest="ntuser")
+
+    (options, args) = parser.parse_args()
+
+    if options.password and options.h:
+        print >> sys.stderr, "Choose either password or hash option"
+        sys.exit(1)
+
+    mkp = masterkey.MasterKeyPool()
+    if options.masterkeydir:
+        mkp.loadDirectory(options.masterkeydir)
+    if options.credhist and options.sid:
+        mkp.addCredhistFile(options.sid, options.credhist)
+
+    # TODO: add exception/error management.
+    with open(options.ntuser, 'rb') as f:
+        r = registry.Registry.Registry(f)
+        datablob = dropbox.Dropbox(r.open('Software\\Dropbox\\ks1').value('Client').value())
+
+        if options.h:
+            datablob.try_decrypt_with_hash(options.h, mkp, options.sid)
+        if options.password:
+            datablob.try_decrypt_with_password(options.password, mkp, options.sid)
+        print datablob
+
+# vim:ts=4:expandtab:sw=4
