@@ -25,11 +25,17 @@ import sys
 from DPAPI import probe
 from DPAPI.Probes import certificate
 
+
 import hashlib
 import os
 import OpenSSL
 import sys
 import binascii
+import ldap
+import string
+import re
+import random
+import struct
 
 from optparse import OptionParser
 
@@ -96,6 +102,110 @@ class Cert(probe.DPAPIProbe):
                     rv.append(p.__str__(indent="    "))
         return "\n".join(rv)
 
+def getsid(binary):
+    version = struct.unpack('B', binary[0])[0]
+    # I do not know how to treat version != 1 (it does not exist yet)
+    assert version == 1, version
+    length = struct.unpack('B', binary[1])[0]
+    authority = struct.unpack('>Q', '\x00\x00' + binary[2:8])[0]
+    string = 'S-%d-%d' % (version, authority)
+    binary = binary[8:]
+    assert len(binary) == 4 * length
+    for i in xrange(length):
+        value = struct.unpack('<L', binary[4*i:4*(i+1)])[0]
+        string += '-%d' % value
+    return string
+
+def ldapread(ldaps, ldapc, ldapu=None):
+    l = ldap.initialize("ldap://" + ldaps)
+    try:
+        l.protocol_version = ldap.VERSION3
+        l.set_option(ldap.OPT_REFERRALS, 0)
+
+        lserver = ldapc.split('@')[-1]
+        luser = ldapc.split(':')[0]
+        m = re.search(":.*@", ldapc)
+        lpass = m.group(0).split(':')[-1][:-1]
+
+        bind = l.simple_bind_s(luser + "@" + lserver, lpass)
+
+        lbase = ""
+        for s in lserver.split('.'):
+            lbase = lbase + "dc=" + s + ","
+        lbase = lbase[:-1]
+
+        if ldapu:
+            criteria = "(&(objectClass=user)(sAMAccountName=" + ldapu + "))"
+        else:
+            criteria = "(&(objectClass=user)(sAMAccountName=" + luser + "))"
+            # criteria = "(&(objectClass=user)(sAMAccountName=blabla))"
+        attributes = ['samaccountname', 'msPKIDPAPIMasterKeys', 'msPKIAccountCredentials', 'objectSid']
+        result = l.search_s(lbase, ldap.SCOPE_SUBTREE, criteria, attributes)
+        # result = l.search_s(lbase, ldap.SCOPE_SUBTREE, criteria)
+
+        ldapresults = [entry for dn, entry in result if isinstance(entry, dict)]
+        # print results
+        #for elem in ldapresults[0]['msPKIDPAPIMasterKeys']:
+        #    print    elem
+    except:
+        print "Error getting data from ldap..."
+        return None
+    finally:
+        l.unbind()
+
+    if len(ldapresults) == 0:
+        print("Error getting data from ldap...")
+        return None, None
+    if 'msPKIDPAPIMasterKeys' not in ldapresults[0] or 'msPKIAccountCredentials' not in ldapresults[0]:
+        print("No msPKIDPAPIMasterKeys or msPKIAccountCredentials retrieved. Noting to decrypt...")
+        return None, None
+    masterkeys = {}
+    pkikeys = {}
+    pkicerts = {}
+    tmpsid = getsid(ldapresults[0]['objectSid'][0])
+
+    for ldapmk in ldapresults[0]['msPKIDPAPIMasterKeys']:
+        bloblen = ldapmk.split(':')[1]
+        if int(bloblen) == 1744:
+            mkname = binascii.unhexlify(ldapmk.split(':')[2][6:80]).strip("\x00")
+            mkdata = binascii.unhexlify(ldapmk.split(':')[2][264:])
+            masterkeys[mkname] = mkdata
+    for ldappki in ldapresults[0]['msPKIAccountCredentials']:
+        bloblen = ldappki.split(':')[1]
+        if int(bloblen) > 100:
+            pkiname = binascii.unhexlify(ldappki.split(':')[2][6:150]).strip("\x00")
+            pkidata = binascii.unhexlify(ldappki.split(':')[2][264:])
+            #if ldappki.split(':')[2][264:270] == "5C0000" or ldappki.split(':')[2][264:270] == "5c0000" or ldappki.split(':')[2][264:270] == "030000":
+            if len(pkiname) == 40:
+                pkicerts[pkiname] = pkidata
+            else:
+                if ldappki.split(':')[2][264:270] == "020000" :
+                    pkikeys[pkiname] = pkidata
+                else:
+                    print("Found unknown msPKIAccountCredentials:")
+                    print(pkiname + "   -   " + binascii.hexlify(pkidata))
+
+    print("So we got %d masterkeys, %d certs and %d rsa keys" % (len(masterkeys), len(pkicerts), len(pkikeys)))
+    tmpdir = "/tmp/dpapi-" + ''.join(random.choice(string.ascii_lowercase) for _ in range(15)) + "/"
+    if not os.path.exists(tmpdir):
+        os.makedirs(tmpdir)
+        os.makedirs(tmpdir + "mk")
+        os.makedirs(tmpdir + "certs")
+        os.makedirs(tmpdir + "rsa")
+    for mk in masterkeys:
+        f = open(tmpdir + "mk/" + mk, "wb")
+        f.write(masterkeys[mk])
+        f.close()
+    for cert in pkicerts:
+        f = open(tmpdir + "certs/" + cert, "wb")
+        f.write(pkicerts[cert])
+        f.close()
+    for pkikey in pkikeys:
+        f = open(tmpdir + "rsa/" + pkikey, "wb")
+        f.write(pkikeys[pkikey])
+        f.close()
+    print("Files have been written in %s." % tmpdir)
+    return tmpdir, tmpsid
 
 
 if __name__ == "__main__":
@@ -105,12 +215,18 @@ if __name__ == "__main__":
     parser.add_option("--credhist", metavar="FILE", dest="credhist")
     parser.add_option("--password", metavar="PASSWORD", dest="password")
     parser.add_option("--hash", metavar="HASH", dest="h")
+    parser.add_argument("--syskey", required=False, metavar="PASSWORD", dest="syskey", help="DPAPI_SYSTEM string. (01000000...)")
     parser.add_option("--private_keys", metavar="DIRECTORY", dest="privkeys")
     parser.add_option("--certificates", metavar="DIRECTORY", dest="certs")
     parser.add_option("--domainkey", metavar="FILE", dest="domkey")
     parser.add_option("--log", metavar="FILE", dest="log")
     parser.add_option("--rsaout", metavar="DIRECTORY", dest="rsaout") #output decdrypted blobs  to comp. files
     parser.add_option("--pfxdir", metavar="DIRECTORY", dest="pfxdir")
+    parser.add_option("--ldap-server", metavar="string", dest="ldaps", help="ldap server IP or domain name")
+    parser.add_option("--ldap-connect", metavar="string", dest="ldapc",
+                      help="ldap connection string: user:password@domain.com")
+    parser.add_option("--ldap-user", metavar="string", dest="ldapu",
+                      help="ldap destination user wich dpapi creds we need. If none then used from connection string")
 
 
 
@@ -126,14 +242,24 @@ if __name__ == "__main__":
     else:
         rsapref = "./"
 
-
+    if options.ldaps and options.ldapc:
+        print("Trying to get keys from LDAP...")
+        tmpdir,tmpsid = ldapread(options.ldaps,options.ldapc,options.ldapu)
+        if not tmpdir:
+            print >> sys.stderr, "LDAP error. Can not continue."
+            sys.exit(1)
+        else:
+            options.masterkeydir = tmpdir+"mk"
+            options.certs = tmpdir+"certs"
+            options.privkeys = tmpdir + "rsa"
+            options.sid = tmpsid
 
     if options.password and options.h:
         print >> sys.stderr, "Choose either password or hash option"
         sys.exit(1)
     if options.password:
         options.h = hashlib.sha1(options.password.encode("UTF-16LE")).hexdigest()
-	options.h = options.h.decode('hex')
+        options.h = options.h.decode('hex')
 
     if options.log:
             log_out = open(options.log, "a")
@@ -155,7 +281,13 @@ if __name__ == "__main__":
         if options.log:
             log_out.write("Decrypted masterkeys: "+str(decrn)+"\n")
 
-    
+    if options.masterkeydir and options.syskey:
+        mkp = masterkey.MasterKeyPool()
+        mkp.loadDirectory(options.masterkeydir)
+        mkp.addSystemCredential(binascii.unhexlify(options.syskey))
+        decrn = mkp.try_credential_hash(None, None)
+        print "Decrypted masterkeys: " + str(decrn)
+
     keys = {}
     certs = {}
     for privkey_item in os.listdir(options.privkeys):
@@ -169,6 +301,8 @@ if __name__ == "__main__":
                         with open("%s/%s.rsa" % (str(rsapref),str(datablob.description).rstrip("\x00")), "wb") as rsa_out:
                             rsa_out.write(datablob.export())
                             rsa_out.close()
+                            #print binascii.hexlify(datablob.privateKey.dpapiblob.blob)
+                            #print binascii.hexlify(datablob.privateKey.dpapiblob.cleartext)
                     if options.log:
                         log_out.write("Decrypted private key %s from %s\n" % (datablob.description, os.path.join(options.privkeys, privkey_item)))
                     #keys[datablob.description.rstrip("\x00")] = datablob
