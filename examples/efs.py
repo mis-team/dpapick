@@ -215,7 +215,7 @@ if __name__ == "__main__":
     parser.add_option("--credhist", metavar="FILE", dest="credhist")
     parser.add_option("--password", metavar="PASSWORD", dest="password")
     parser.add_option("--hash", metavar="HASH", dest="h")
-    parser.add_argument("--syskey", required=False, metavar="PASSWORD", dest="syskey", help="DPAPI_SYSTEM string. (01000000...)")
+    parser.add_option("--syskey", metavar="PASSWORD", dest="syskey", help="DPAPI_SYSTEM string. (01000000...)")
     parser.add_option("--private_keys", metavar="DIRECTORY", dest="privkeys")
     parser.add_option("--certificates", metavar="DIRECTORY", dest="certs")
     parser.add_option("--domainkey", metavar="FILE", dest="domkey")
