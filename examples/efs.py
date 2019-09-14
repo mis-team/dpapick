@@ -257,9 +257,15 @@ if __name__ == "__main__":
     if options.password and options.h:
         print >> sys.stderr, "Choose either password or hash option"
         sys.exit(1)
+
     if options.password:
         options.h = hashlib.sha1(options.password.encode("UTF-16LE")).hexdigest()
         options.h = options.h.decode('hex')
+
+
+    if options.h:
+        options.h = options.h.decode('hex')
+
 
     if options.log:
             log_out = open(options.log, "a")
@@ -273,10 +279,18 @@ if __name__ == "__main__":
             log_out.write("Decrypted masterkeys: "+str(decrn)+"\n")
         #print mkp
 
-    if options.masterkeydir and options.password and options.sid:
+    if options.masterkeydir and options.password  and options.sid:
         mkp = masterkey.MasterKeyPool()
         mkp.loadDirectory(options.masterkeydir)
         decrn = mkp.try_credential(options.sid,options.password)
+        print "Decrypted masterkeys: "+str(decrn)
+        if options.log:
+            log_out.write("Decrypted masterkeys: "+str(decrn)+"\n")
+
+    if options.masterkeydir and options.h  and options.sid:
+        mkp = masterkey.MasterKeyPool()
+        mkp.loadDirectory(options.masterkeydir)
+        decrn = mkp.try_credential_hash(options.sid,options.h)
         print "Decrypted masterkeys: "+str(decrn)
         if options.log:
             log_out.write("Decrypted masterkeys: "+str(decrn)+"\n")
