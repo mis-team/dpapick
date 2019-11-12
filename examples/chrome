@@ -23,6 +23,7 @@ import hashlib
 import datetime
 import os
 import sys
+import binascii
 from optparse import OptionParser
 
 
@@ -71,9 +72,11 @@ if __name__ == '__main__':
     parser.add_option("--credhist", metavar="FILE", dest="credhist")
     parser.add_option("--password", metavar="PASSWORD", dest="password")
     parser.add_option("--hash", metavar="HASH", dest="h")
-    parser.add_option("--pkey", metavar="Private domain KEY", dest="pkey")
+    parser.add_option("--pkey", metavar="Private domain KEY in PEM format. Use openssl to conver DER to PEM.", dest="pkey")
+    parser.add_option("--dkey", metavar="Decrypted masterkeys in hex (from mimikatz sekurlsa::dpapi). May be a multiple keys separated by comma", dest="dkey")
     parser.add_option("--chrome", metavar="CHROMEDB", dest="chromedbs",action="append")
     parser.add_option("--cookie", metavar="CHROMEDB", dest="chromecoo",action="append")
+
                       
 
     (options, args) = parser.parse_args()
@@ -85,11 +88,18 @@ if __name__ == '__main__':
         options.h = hashlib.sha1(options.password.encode("UTF-16LE")).hexdigest()
         options.h = options.h.decode('hex')
 
-    print "Loading masterkeys..."
-    mkp = masterkey.MasterKeyPool()
-    mkp.loadDirectory(options.masterkeydir)
-    print "Trting to decrypt keys..."
-    print mkp.try_credential(options.sid,options.password)
+    if options.dkey:
+        print "Loaded given decrypted makterkey..."
+        mkp = masterkey.MasterKeyPool()
+        dkeys = options.dkey.split(',')
+    else:
+
+        print "Loading masterkeys..."
+        mkp = masterkey.MasterKeyPool()
+        mkp.loadDirectory(options.masterkeydir)
+        print "Trting to decrypt keys..."
+        print mkp.try_credential(options.sid,options.password)
+        print mkp
 
     if options.credhist != None:
         mkp.addCredhistFile(options.sid, options.credhist)
@@ -126,11 +136,19 @@ if __name__ == '__main__':
                     #print f
                     w[f] = row[f]
                 b = chrome.ChromePassword(w["encrypted_value"])
-                if b.try_decrypt_with_hash(options.h, mkp, options.sid):
-                #if b.try_decrypt_with_hash(None, mkp, None):
-                    w["encrypted_value"] = b.cleartext
+                if options.dkey:
+                    for dkey in options.dkey.split(","):
+                        if b.try_decrypt_with_key(options.h, binascii.unhexlify(dkey), options.sid):
+                            w["encrypted_value"] = b.cleartext
+                            break
+                        else:
+                            w["encrypted_value"] = "<unable to decrypt>"
                 else:
-                    w["encrypted_value"] = "<unable to decrypt>"
+                    if b.try_decrypt_with_hash(options.h, mkp, options.sid):
+                    #if b.try_decrypt_with_hash(None, mkp, None):
+                        w["encrypted_value"] = b.cleartext
+                    else:
+                        w["encrypted_value"] = "<unable to decrypt>"
 
                 if w["expires_utc"]:
                     timestamp=w["expires_utc"]
@@ -179,12 +197,25 @@ if __name__ == '__main__':
                 w = {}
                 for f in fields:
                     w[f] = row[f]
+                timestamp = w["date_created"]
+                try:
+                    w["date_created"] = datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=timestamp)
+                except:
+                    w["date_created"] = "Undefined"
                 b = chrome.ChromePassword(w["password_value"])
-                if b.try_decrypt_with_hash(options.h, mkp, options.sid):
-                #if b.try_decrypt_with_hash(None, mkp, None):
-                    w["password_value"] = b.cleartext
+                if options.dkey:
+                    for dkey in options.dkey.split(","):
+                        if b.try_decrypt_with_key(options.h, binascii.unhexlify(dkey), options.sid):
+                            w["password_value"] = b.cleartext
+                            break
+                        else:
+                            w["password_value"] = "<unable to decrypt>"
                 else:
-                    w["password_value"] = "<unable to decrypt>"
+                    if b.try_decrypt_with_hash(options.h, mkp, options.sid):
+                    #if b.try_decrypt_with_hash(None, mkp, None):
+                        w["password_value"] = b.cleartext
+                    else:
+                        w["password_value"] = "<unable to decrypt>"
                 values.append(w)
             c.close()
             conn.close()
@@ -197,4 +228,4 @@ if __name__ == '__main__':
         print "\n".join(s)
 
 # vim:ts=4:expandtab:sw=4
-
+ 
