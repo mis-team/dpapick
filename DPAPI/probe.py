@@ -98,6 +98,28 @@ class DPAPIProbe(eater.DataStruct):
                     return True
         return False
 
+    def try_decrypt_with_key(self, h, key, sid, **k):
+        """Decryption loop for general blobs with given decrypted key.
+            This function will call preprocess() first, then tries to decrypt.
+
+            k may contain optional values such as:
+                entropy: the optional entropy to use with that blob.
+                strong: strong password given by the user
+
+            Basic probes should not override this one as it contains the full
+            decryption logic.
+
+            Returns True/False upon decryption success/failure.
+
+        """
+        self.preprocess(**k)
+        
+        self.dpapiblob.decrypt(key, self.entropy, k.get("strong", None))
+        if self.dpapiblob.decrypted:
+            self.postprocess(**k)
+            return True
+        return False
+
     def try_decrypt_with_password(self, password, mkeypool, sid, **k):
         """Decryption loop for general blobs with given user's password.
             Simply computes the hash then calls try_decrypt_with_hash()
@@ -121,4 +143,3 @@ class DPAPIProbe(eater.DataStruct):
         return "\n".join(s)
 
 # vim:ts=4:expandtab:sw=4
-
