@@ -16,16 +16,34 @@
 ##                                                                         ##
 #############################################################################
 
+from DPAPI import probe
 from DPAPI.Probes import chrome
 from DPAPI.Core import masterkey
+from DPAPI.Core import blob
 import sqlite3
 import hashlib
 import datetime
 import os
 import sys
 import binascii
+import base64
+import json
+from Cryptodome.Cipher import AES
 from optparse import OptionParser
 
+class GenericDecryptor(probe.DPAPIProbe):
+    def parse(self, data):
+        self.dpapiblob = blob.DPAPIBlob(data.remain())
+
+    def __getattr__(self, name):
+        return getattr(self.dpapiblob, name)
+
+    def __repr__(self):
+        s = ["Generic password decryptor"]
+        if self.dpapiblob is not None and self.dpapiblob.decrypted:
+            s.append("        password = %s" % self.cleartext)
+        s.append("    %r" % self.dpapiblob)
+        return "\n".join(s)
 
 class GetChromePasswords:
 
@@ -67,63 +85,101 @@ class GetChromePasswords:
 
 if __name__ == '__main__':
     parser = OptionParser()
-    parser.add_option("--sid", metavar="SID", dest="sid")
-    parser.add_option("--masterkey", metavar="DIRECTORY", dest="masterkeydir")
-    parser.add_option("--credhist", metavar="FILE", dest="credhist")
-    parser.add_option("--password", metavar="PASSWORD", dest="password")
-    parser.add_option("--hash", metavar="HASH", dest="h")
-    parser.add_option("--pkey", metavar="Private domain KEY in PEM format. Use openssl to conver DER to PEM.", dest="pkey")
-    parser.add_option("--dkey", metavar="Decrypted masterkeys in hex (from mimikatz sekurlsa::dpapi). May be a multiple keys separated by comma", dest="dkey")
-    parser.add_option("--chrome", metavar="CHROMEDB", dest="chromedbs",action="append")
-    parser.add_option("--cookie", metavar="CHROMEDB", dest="chromecoo",action="append")
+    parser.add_option("--sid", help="User SID", dest="sid")
+    parser.add_option("--masterkey", help="Masterkey directory", dest="masterkeydir")
+    parser.add_option("--credhist", help="User credhist file", dest="credhist")
+    parser.add_option("--password", help="User password", dest="password")
+    parser.add_option("--hash", help="SHA1 hash", dest="h")
+    parser.add_option("--pkey", help="Private domain KEY in PEM format. Use openssl to conver DER to PEM.", dest="pkey")
+    parser.add_option("--dkey", help="Decrypted masterkeys in hex (from mimikatz sekurlsa::dpapi). May be a multiple keys separated by comma", dest="dkey")
+    parser.add_option("--chrome", help="Chrome database file (login data)", dest="chromedbs",action="append")
+    parser.add_option("--lstate", help="Chrome State file (local state)", dest="chromestate")
+    parser.add_option("--cookie", help="Chrome cookies file (cookies)", dest="chromecoo",action="append")
+    parser.add_option("--debug", action="store_true", help="Show debug messages", dest="debug", default=False)
 
                       
 
     (options, args) = parser.parse_args()
+    if options.masterkeydir == None:
+        print "Give me masterkeys directory please..."
+        sys.exit(1)
 
     if options.password and options.h:
-        print >>sys.stderr,"Choose either password or hash option"
+        print "Choose either password or hash option"
         sys.exit(1)
+
     if options.password:
         options.h = hashlib.sha1(options.password.encode("UTF-16LE")).hexdigest()
         options.h = options.h.decode('hex')
 
     if options.dkey:
-        print "Loaded given decrypted makterkey..."
+        if options.debug: print "Loaded given decrypted masterkey..."
         mkp = masterkey.MasterKeyPool()
         dkeys = options.dkey.split(',')
     else:
 
-        print "Loading masterkeys..."
+        if options.debug: print "Loading masterkeys..."
         mkp = masterkey.MasterKeyPool()
         mkp.loadDirectory(options.masterkeydir)
-        print "Trting to decrypt keys..."
+        if options.debug: print "Trying to decrypt keys with pass and SID..."
         print mkp.try_credential(options.sid,options.password)
-        print mkp
+        #print mkp
 
     if options.credhist != None:
         mkp.addCredhistFile(options.sid, options.credhist)
 
     if options.pkey:
         decrn = mkp.try_domain(options.pkey)
-        if decrn > 0:
-            print "Decrypted: "+str(decrn)
+        if decrn > 0 and options.debug:
+            print "Trying to decrypt keys with domain key..."
+            print "Decrypted masterkeys: "+str(decrn)
             for mkl in mkp.keys.values(): #mkl - list with mk, mkbackup, mkdomain
              for mk in mkl:
                 print mk.guid
-                #print mk.masterkey
+                
+
+    if options.chromestate:
+        if not os.path.isfile(options.chromestate):
+            print "Error opening chrome file\n"
+            stateblob = None
+            statekey = None
+        else:
+            if options.debug: print "Debug: parsing chrome local state\n"
+            try:
+                with open(options.chromestate) as jsonfile:
+                    jsondata = json.load(jsonfile)
+                stateblob = base64.b64decode(jsondata["os_crypt"]["encrypted_key"])[5:]
+                stateprobe = GenericDecryptor(stateblob)
+                if stateprobe:
+                        print "Debug: Trying to decrypt local state key...\n"
+                        if stateprobe.try_decrypt_with_hash(None, mkp, None):
+                            if options.debug: print("Debug: Success! Decrypted key hex: %s" % binascii.hexlify(stateprobe.cleartext))
+                            statekey = stateprobe.cleartext
+                        else:
+                            statekey = None
+                            print "Failed to decrypt local state key...\n"
+            except:
+                print "Error parsing chrome local state\n"
+                stateblob = None
+                statekey = None
+    else:
+        stateblob = None
+        statekey = None
+
+
 
 # 'creation_utc', 'host_key', 'value,path', 'expires_utc', 'secure', 'httponly', 'last_access_utc', 'has_expires', 'persistent', 'priority', 'encrypted_value', 'firstpartyonly' 
     fields = [ 'origin_url', 'action_url', 'username_element',
                'username_value', 'password_element', 'password_value',
                'date_created' ]
-    fields1 = [ 'creation_utc', 'host_key', 'name', 'value', 'path', 'expires_utc', 'secure', 'httponly', 'last_access_utc', 'has_expires', 'persistent', 'priority', 'encrypted_value', 'firstpartyonly'  ]
+    fields1 = [ 'creation_utc', 'host_key', 'name', 'value', 'path', 'expires_utc', 'is_secure', 'is_httponly', 'last_access_utc', 'has_expires', 'is_persistent', 'priority', 'encrypted_value' ]
 
     values = []
 
     if options.chromecoo:
         for db in options.chromecoo:
             if not os.path.isfile(db):
+                print "Error opening chrome cookies file\n"
                 continue
             conn = sqlite3.connect(db)
             conn.row_factory = sqlite3.Row
@@ -135,19 +191,46 @@ if __name__ == '__main__':
                 for f in fields1:
                     #print f
                     w[f] = row[f]
-                b = chrome.ChromePassword(w["encrypted_value"])
-                if options.dkey:
-                    for dkey in options.dkey.split(","):
-                        if b.try_decrypt_with_key(options.h, binascii.unhexlify(dkey), options.sid):
-                            w["encrypted_value"] = b.cleartext
-                            break
-                        else:
-                            w["encrypted_value"] = "<unable to decrypt>"
-                else:
-                    if b.try_decrypt_with_hash(options.h, mkp, options.sid):
-                    #if b.try_decrypt_with_hash(None, mkp, None):
-                        w["encrypted_value"] = b.cleartext
+
+
+                if str(w["encrypted_value"][:3]) == "v10":
+                    # new style encrypted password. We need state keys to decrypt
+                    if statekey:
+                        try:
+
+                            data = w["encrypted_value"]
+                            nonce = data[3:3 + 12]
+                            ciphertext = data[3 + 12:-16]
+                            tag = data[-16:]
+
+                            cipher = AES.new(statekey, AES.MODE_GCM, nonce=nonce)
+                            w["encrypted_value"] = cipher.decrypt_and_verify(ciphertext, tag)
+                            if w["encrypted_value"] == "":
+                                w["encrypted_value"] = "<Decrypted empty string (new style password)>"
+                                
+
+                        except:
+                            print "Error decrypting v80 cookie with state key\n"
                     else:
+                        w["encrypted_value"] = "<Can't decrypt new style cookie. State key not decrypted>"
+                        
+                else:
+                    try:
+                        b = chrome.ChromePassword(w["encrypted_value"])
+                        if options.dkey:
+                            for dkey in options.dkey.split(","):
+                                if b.try_decrypt_with_key(options.h, binascii.unhexlify(dkey), options.sid):
+                                    w["encrypted_value"] = b.cleartext
+                                    break
+                                else:
+                                    w["encrypted_value"] = "<unable to decrypt>"
+                        else:
+                            if b.try_decrypt_with_hash(options.h, mkp, options.sid):
+                            #if b.try_decrypt_with_hash(None, mkp, None):
+                                w["encrypted_value"] = b.cleartext
+                            else:
+                                w["encrypted_value"] = "<unable to decrypt>"
+                    except:
                         w["encrypted_value"] = "<unable to decrypt>"
 
                 if w["expires_utc"]:
@@ -177,23 +260,29 @@ if __name__ == '__main__':
             c.close()
             conn.close()
 
-        s = ["Chrome Cookies"]
+        s = ["Chrome Cookies:"]
         for e in values:
             s.append('-'*40)
             for f in fields1:
                 s.append("%s: %s" % (f, e[f]))
         print "\n".join(s)
 
-
+    print "\n"        
     if options.chromedbs:
+        values = []
         for db in options.chromedbs:
+
             if not os.path.isfile(db):
+                print "Error opening chrome logins file\n"
                 continue
+            else:
+                if options.debug: print "Debug: opened chrome logins file\n"
             conn = sqlite3.connect(db)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
             c.execute("SELECT %s FROM logins" % ",".join(fields))
             for row in c:
+
                 w = {}
                 for f in fields:
                     w[f] = row[f]
@@ -202,30 +291,62 @@ if __name__ == '__main__':
                     w["date_created"] = datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=timestamp)
                 except:
                     w["date_created"] = "Undefined"
-                b = chrome.ChromePassword(w["password_value"])
-                if options.dkey:
-                    for dkey in options.dkey.split(","):
-                        if b.try_decrypt_with_key(options.h, binascii.unhexlify(dkey), options.sid):
-                            w["password_value"] = b.cleartext
-                            break
-                        else:
-                            w["password_value"] = "<unable to decrypt>"
-                else:
-                    if b.try_decrypt_with_hash(options.h, mkp, options.sid):
-                    #if b.try_decrypt_with_hash(None, mkp, None):
-                        w["password_value"] = b.cleartext
+
+
+                if str(w["password_value"][:3]) == "v10":
+                    # new style encrypted password. We need state keys to decrypt
+                    if statekey:
+                        try:
+
+                            data = w["password_value"]
+                            nonce = data[3:3 + 12]
+                            ciphertext = data[3 + 12:-16]
+                            tag = data[-16:]
+
+                            cipher = AES.new(statekey, AES.MODE_GCM, nonce=nonce)
+                            w["password_value"] = cipher.decrypt_and_verify(ciphertext, tag)
+                            if w["password_value"] == "":
+                                w["password_value"] = "<Decrypted empty string (new style password)>"
+                                
+
+                        except:
+                            print "Error decrypting v80 password with state key\n"
                     else:
-                        w["password_value"] = "<unable to decrypt>"
+                        w["password_value"] = "<Can't decrypt new style password. State key not decrypted>"
+                        
+                else:
+                    #old style password. Decrypding DPAPI blob
+                    try:
+                        b = chrome.ChromePassword(w["password_value"])
+                        if options.dkey:
+                            for dkey in options.dkey.split(","):
+                                if b.try_decrypt_with_key(options.h, binascii.unhexlify(dkey), options.sid):
+                                    w["password_value"] = b.cleartext
+                                    break
+                                else:
+                                    w["password_value"] = "<unable to decrypt>"
+
+                        else:
+                            if b.try_decrypt_with_hash(options.h, mkp, options.sid):
+                                if b.cleartext == "":
+                                    w["password_value"] = "<Decrypted empty string (old style password)>"
+                                    
+                                else:
+                                    w["password_value"] = b.cleartext
+                            else:
+                                w["password_value"] = "<unable to decrypt>"
+                    except:
+                        w["password_value"] = "<error read DPAPI blob from chrome db>"
+                        
+                        print "Error to read DPAPI blob from chrome db\n"
                 values.append(w)
             c.close()
             conn.close()
 
-        s = ["Chrome passwords"]
+        s = ["Chrome passwords:"]
         for e in values:
             s.append('-'*40)
             for f in fields:
                 s.append("%s: %s" % (f, e[f]))
         print "\n".join(s)
-
-# vim:ts=4:expandtab:sw=4
- 
+  
